@@ -4,12 +4,16 @@ sentence-transformers==2.2.2
 datasets==2.14.0
 faiss-cpu==1.7.4
 numpy==1.24.3
+pandas==2.1.1
 tqdm==4.66.1
 langchain==0.0.335
-llama-cpp-python==0.2.11
+llama-cpp-python==0.3.26
 evaluate==0.4.1
 nltk==3.8.1
 colorama==0.4.6
 shap==0.43.0
 matplotlib==3.8.0
+plotly==5.17.0
 requests==2.31.0
+streamlit==1.39.0
+langdetect==1.0.9

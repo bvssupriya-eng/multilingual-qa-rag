@@ -43,10 +43,10 @@ def normalize_code_mixed_query(query, language):
     lowered = cleaned.lower()
 
     transliterated_hint = lowered
-    if language in {"hi", "bn"}:
+    if language in {"hi", "bn"} and re.search(r"[a-zA-Z]", lowered):
         words = []
         for token in re.findall(r"\w+|\S", lowered, flags=re.UNICODE):
-            replacement = COMMON_CODE_MIX_MAP.get(token, token)
+            replacement = COMMON_CODE_MIX_MAP.get(token, token) if re.search(r"[a-zA-Z]", token) else token
             if replacement:
                 words.append(replacement)
         transliterated_hint = " ".join(words)

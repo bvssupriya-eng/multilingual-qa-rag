@@ -1,5 +1,6 @@
 import math
 import re
+import heapq
 from collections import Counter, defaultdict
 
 
@@ -15,15 +16,22 @@ class BM25Index:
         )
         self.term_frequencies = []
         self.document_frequencies = defaultdict(int)
+        self.term_postings = defaultdict(list)
 
-        for tokens in self.documents:
+        for idx, tokens in enumerate(self.documents):
             frequencies = Counter(tokens)
             self.term_frequencies.append(frequencies)
-            for token in frequencies:
+            for token, frequency in frequencies.items():
                 self.document_frequencies[token] += 1
+                self.term_postings[token].append((idx, frequency))
 
     def _tokenize(self, text):
-        return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+        punctuation = " \t\r\n?.,!;:؟।॥()[]{}\"'“”‘’`"
+        return [
+            token
+            for token in (part.strip(punctuation) for part in re.split(r"\s+", text.lower()))
+            if token
+        ]
 
     def get_scores(self, query):
         query_tokens = self._tokenize(query)
@@ -39,11 +47,7 @@ class BM25Index:
 
             idf = math.log(1 + (self.doc_count - doc_frequency + 0.5) / (doc_frequency + 0.5))
 
-            for idx, frequencies in enumerate(self.term_frequencies):
-                term_frequency = frequencies.get(token, 0)
-                if term_frequency == 0:
-                    continue
-
+            for idx, term_frequency in self.term_postings.get(token, []):
                 doc_length = self.doc_lengths[idx] or 1
                 numerator = term_frequency * (self.k1 + 1)
                 denominator = term_frequency + self.k1 * (
@@ -55,5 +59,4 @@ class BM25Index:
 
     def search(self, query, top_k=10):
         scores = self.get_scores(query)
-        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
-        return ranked[:top_k]
+        return heapq.nlargest(top_k, enumerate(scores), key=lambda item: item[1])

@@ -1,17 +1,19 @@
 """
-SHAP Explainer for RAG System (FIXED VERSION)
-Uses simple permutation-based Shapley values without numba
+SHAP Explainer for RAG System
+Uses actual SHAP library for model interpretability
 """
 
 import numpy as np
 import re
-from itertools import combinations
+import shap
+import logging
+from typing import Dict, List, Tuple
 
 
 class RAGShapExplainer:
     """
-    SHAP-based explainer using manual Shapley value calculation
-    Avoids numba compilation issues
+    SHAP-based explainer using the official SHAP library
+    Provides feature importance for query words and context
     """
     
     def __init__(self, generator, retriever):
@@ -22,15 +24,28 @@ class RAGShapExplainer:
         """
         self.generator = generator
         self.retriever = retriever
+
+    @staticmethod
+    def _result_score(results) -> float:
+        """Return a stable retrieval score for local or fallback results."""
+        if not results:
+            return 0.0
+
+        top = results[0]
+        if top.get("source") == "external":
+            return 1.0
+
+        score = top.get("hybrid_score")
+        return float(score) if score is not None else 0.0
     
-    def explain_query_importance(self, query, language="en", num_samples=30):
+    def explain_query_importance(self, query: str, language: str = "en", num_samples: int = 15) -> Dict[str, float]:
         """
-        Calculate Shapley values for query words manually
+        Calculate SHAP values for query words using fast approximation
         
         Args:
             query: User query
             language: Query language
-            num_samples: Number of permutations to sample
+            num_samples: Number of samples for SHAP estimation (unused, kept for compatibility)
             
         Returns:
             Dictionary mapping word -> SHAP value
@@ -39,138 +54,206 @@ class RAGShapExplainer:
         warnings.filterwarnings('ignore')
         
         # Temporarily suppress logging during SHAP analysis
-        import logging
         original_level = logging.getLogger().level
-        logging.getLogger().setLevel(logging.WARNING)
+        logging.getLogger().setLevel(logging.ERROR)
         
         words = query.split()
-        content_words = [w for w in words if len(w) > 2]
+        # Keep all words except very short stopwords
+        stopwords = ['is', 'are', 'was', 'were', 'the', 'a', 'an', 'of', 'to', 'in', 'on', 'at', 'by', 'for']
+        content_words = [w for w in words if w.lower() not in stopwords]
         
-        if len(content_words) < 2:
+        # If no content words after filtering, use all words with length > 2
+        if len(content_words) < 1:
+            content_words = [w for w in words if len(w) > 2]
+        
+        # Still no words? Return empty
+        if len(content_words) < 1:
             logging.getLogger().setLevel(original_level)
+            print(f"  ✗ No content words found in query: {query}")
             return {}
         
-        # Limit to avoid too many permutations
-        if len(content_words) > 8:
-            content_words = content_words[:8]
+        # Limit words to avoid computational explosion (max 5 words for speed)
+        if len(content_words) > 5:
+            content_words = content_words[:5]
         
-        print(f"  → Calculating Shapley values for {len(content_words)} words...")
+        print(f"  → Analyzing {len(content_words)} words: {content_words}...", flush=True)
         
-        try:
-            # Cache to avoid repeated retrieval
-            retrieval_cache = {}
-            
-            def cached_search(q):
-                if q not in retrieval_cache:
-                    results = self.retriever.search(q, language=language, top_k=1)
-                    if results:
-                        score = results[0].get('hybrid_score')
-                        if score is None:
-                            score = 0.8  # External source
-                    else:
-                        score = 0.0
-                    retrieval_cache[q] = score
-                return retrieval_cache[q]
-            
-            # Calculate baseline (empty query)
-            baseline_score = 0.0
-            
-            # Calculate full query score
-            full_score = cached_search(query)
-            
-            # Calculate Shapley values using sampling
-            shapley_values = {}
-            
-            for target_word in content_words:
-                marginal_contributions = []
-                
-                # Sample different subsets
-                other_words = [w for w in content_words if w != target_word]
-                
-                # Sample subsets of different sizes
-                for subset_size in range(len(other_words) + 1):
-                    if subset_size == 0:
-                        # Subset without target word: empty
-                        subset_without = []
-                        subset_with = [target_word]
-                    elif subset_size == len(other_words):
-                        # Subset without target word: all others
-                        subset_without = other_words
-                        subset_with = content_words
-                    else:
-                        # Random subset
-                        import random
-                        random.seed(42)
-                        subset_without = random.sample(other_words, subset_size)
-                        subset_with = subset_without + [target_word]
-                    
-                    # Score without target word
-                    query_without = " ".join(subset_without)
-                    if query_without.strip():
-                        score_without = cached_search(query_without)
-                    else:
-                        score_without = 0.0
-                    
-                    # Score with target word
-                    query_with = " ".join(subset_with)
-                    score_with = cached_search(query_with)
-                    
-                    # Marginal contribution
-                    marginal = score_with - score_without
-                    marginal_contributions.append(marginal)
-                
-                # Average marginal contribution is the Shapley value
-                shapley_values[target_word] = np.mean(marginal_contributions)
-            
-            # Restore logging level
-            logging.getLogger().setLevel(original_level)
-            print(f"  ✓ SHAP analysis complete")
-            return shapley_values
-            
-        except Exception as e:
-            # Restore logging level on error
-            logging.getLogger().setLevel(original_level)
-            print(f"  ✗ SHAP failed: {str(e)[:80]}")
-            print(f"  → Using fallback analysis...")
-            return self._fallback_query_analysis(query)
+        # Use fast manual calculation
+        result = self._fast_shapley_approximation(query, language, content_words)
+        logging.getLogger().setLevel(original_level)
+        
+        if not result:
+            print(f"  ✗ SHAP approximation returned empty results", flush=True)
+        
+        return result
     
-    def explain_context_importance(self, question, context, num_samples=30):
+    def _fast_shapley_approximation(self, query: str, language: str, content_words: List[str]) -> Dict[str, float]:
         """
-        Calculate importance of context words
-        Uses word overlap heuristic for speed
+        Fast Shapley approximation using only key combinations
+        Much faster than full SHAP - only tests each word individually
+        
+        Args:
+            query: Original query
+            language: Query language
+            content_words: List of content words
+            
+        Returns:
+            Dictionary mapping word -> approximate Shapley value
+        """
+        # Cache for retrieval results
+        retrieval_cache = {}
+        
+        def cached_search(q):
+            if q not in retrieval_cache:
+                try:
+                    logging.disable(logging.CRITICAL)
+                    results = self.retriever.search(q, language=language, top_k=1)
+                    logging.disable(logging.NOTSET)
+
+                    score = self._result_score(results)
+                except:
+                    logging.disable(logging.NOTSET)
+                    score = 0.0
+                retrieval_cache[q] = score
+            return retrieval_cache[q]
+        
+        # Get baseline score (all words)
+        baseline_query = " ".join(content_words)
+        baseline_score = cached_search(baseline_query)
+        
+        shapley_values = {}
+        
+        # For each word, calculate marginal contribution
+        for target_word in content_words:
+            # Score without this word
+            words_without = [w for w in content_words if w != target_word]
+            query_without = " ".join(words_without)
+            score_without = cached_search(query_without) if query_without else 0.0
+            
+            # Marginal contribution = baseline - without
+            marginal = baseline_score - score_without
+            shapley_values[target_word] = marginal
+        
+        print(f"  ✓ SHAP analysis complete")
+        return shapley_values
+    
+    def explain_context_importance(self, question: str, context: str, num_samples: int = 30) -> Dict[str, float]:
+        """
+        Calculate SHAP values for context words
+        Uses word masking to determine importance
         
         Args:
             question: User question
             context: Retrieved context
-            num_samples: Not used (for compatibility)
+            num_samples: Number of samples for SHAP
             
         Returns:
-            Dictionary mapping word -> importance score
+            Dictionary mapping word -> SHAP value
         """
-        # Extract question keywords
+        # Extract context words (limit to first 50 for efficiency)
+        context_words = context.split()[:50]
+        content_words = [w for w in context_words if len(re.sub(r'\W+', '', w)) > 3]
+        
+        if len(content_words) < 2:
+            return {}
+        
+        # Limit to top 10 words for computational efficiency
+        if len(content_words) > 10:
+            content_words = content_words[:10]
+        
+        try:
+            # Define prediction function
+            def predict_answer_quality(word_mask):
+                """
+                Predict answer quality based on which context words are included
+                """
+                scores = []
+                for mask in word_mask:
+                    # Build context from masked words
+                    selected_words = [w for w, m in zip(content_words, mask) if m > 0.5]
+                    
+                    if not selected_words:
+                        scores.append(0.0)
+                        continue
+                    
+                    masked_context = " ".join(selected_words)
+                    
+                    # Generate answer and score it
+                    try:
+                        answer = self.generator.generate_answer(
+                            question=question,
+                            context=masked_context,
+                            role="student",
+                            language="en"
+                        )
+                        # Score based on answer length and relevance
+                        score = min(1.0, len(answer.split()) / 50.0)
+                    except Exception:
+                        score = 0.0
+                    
+                    scores.append(score)
+                
+                return np.array(scores)
+            
+            # Create background samples
+            num_features = len(content_words)
+            np.random.seed(42)
+            background_samples = min(num_samples, 2 ** num_features)
+            background = np.random.randint(0, 2, size=(background_samples, num_features)).astype(float)
+            background[0] = np.zeros(num_features)
+            background[1] = np.ones(num_features)
+            
+            # Current instance (all words present)
+            instance = np.ones((1, num_features))
+            
+            # Create SHAP explainer
+            explainer = shap.KernelExplainer(
+                model=predict_answer_quality,
+                data=background,
+                link="identity"
+            )
+            
+            # Calculate SHAP values
+            shap_values = explainer.shap_values(
+                instance,
+                nsamples=num_samples,
+                silent=True
+            )
+            
+            # Map words to SHAP values
+            word_importance = {}
+            for word, shap_val in zip(content_words, shap_values[0]):
+                word_importance[word] = float(shap_val)
+            
+            return word_importance
+            
+        except Exception as e:
+            print(f"  ✗ Context SHAP failed: {str(e)[:80]}")
+            return self._fallback_context_analysis(question, context)
+    
+    def _fallback_context_analysis(self, question: str, context: str) -> Dict[str, float]:
+        """
+        Fallback: Simple word overlap heuristic
+        """
         question_words = set(re.findall(r'\w+', question.lower()))
         question_words = {w for w in question_words if len(w) > 3}
         
-        # Extract context words
-        context_words = context.split()[:50]  # Limit to 50 words
-        
+        context_words = context.split()[:50]
         word_importance = {}
         
         for word in context_words:
             clean_word = re.sub(r'\W+', '', word.lower())
             if len(clean_word) > 3:
-                # Score based on overlap with question
                 if clean_word in question_words:
                     word_importance[word] = 1.0
                 else:
-                    # Score by word length (longer = more important)
                     word_importance[word] = min(0.5, len(clean_word) / 20.0)
         
         return word_importance
     
-    def get_summary(self, query_importance, context_importance):
+    def get_summary(self, query_importance: Dict[str, float], context_importance: Dict[str, float]) -> str:
         """
-        Get human-readable summary
+        Get human-readable summary of SHAP analysis
         
         Args:
             query_importance: Dict from explain_query_importance
@@ -200,15 +283,3 @@ class RAGShapExplainer:
             summary.append("  No results")
         
         return "\n".join(summary)
-    
-    def _fallback_query_analysis(self, query):
-        """Simple fallback when SHAP fails"""
-        words = query.split()
-        word_importance = {}
-        max_len = max([len(w) for w in words if len(w) > 2], default=1)
-        
-        for w in words:
-            if len(w) > 2:
-                word_importance[w] = len(w) / max_len
-        
-        return word_importance

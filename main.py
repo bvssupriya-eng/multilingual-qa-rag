@@ -44,13 +44,13 @@ def main():
         elif choice == "3":
             print("\n[PHASE 3: Retrieval Testing]")
             import subprocess
-            subprocess.run(["python", "run_phase3.py"])
+            subprocess.run(["python", "pipeline_phases/run_phase3.py"])
             input("\nPress Enter to continue...")
         
         elif choice == "4":
             print("\n[PHASE 4: Full RAG Pipeline]")
             import subprocess
-            subprocess.run(["python", "run_phase4.py"])
+            subprocess.run(["python", "pipeline_phases/run_phase4.py"])
             input("\nPress Enter to continue...")
         
         elif choice == "5":
